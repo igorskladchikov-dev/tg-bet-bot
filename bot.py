@@ -31,7 +31,8 @@ def get_token():
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
-    u = storage.get_user(user.id, user.username or "")
+    chat_id = update.effective_chat.id
+    u = storage.get_user(chat_id, user.id, user.username or "")
     balance = u["balance"]
     await update.message.reply_text(
         "Здорова, лудик. Сейчас попробуем сохранить твои бабки, но оставить интерес. Погнали...\n\n"
@@ -41,6 +42,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/balance — баланс\n"
         "/bet описание | коэффициент | сумма — сделать ставку\n"
         "/bets — мои ставки (кнопки «Сыграло» / «Не сыграло»)\n"
+        "/active — все нерассчитанные ставки в чате\n"
         "/top — таблица по балансам\n"
         "/results — подвести итоги и сбросить балансы до 10 000 ₽\n"
         "/help — полное руководство по боту"
@@ -63,6 +65,8 @@ HELP_TEXT = """📖 Руководство по боту «Ставки с др�
 Пример: /bet Победа Спартака | 2.0 | 500
 
 /bets — список своих ставок. У активных ставок есть кнопки «✅ Сыграло» и «❌ Не сыграло» — нажмите, чтобы закрыть ставку.
+
+/active — показать все нерассчитанные ставки в чате (кто поставил, на что, коэффициент и сумма)
 
 /top — таблица участников по балансу
 
@@ -89,12 +93,14 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
-    balance = storage.get_balance(user_id)
+    chat_id = update.effective_chat.id
+    balance = storage.get_balance(chat_id, user_id)
     await update.message.reply_text(f"Твой баланс: {balance:,} ₽")
 
 
 async def cmd_bet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
     text = (update.message.text or "").strip()
     # /bet description | rate | sum
     parts = re.split(r"\s*\|\s*", text.replace("/bet", "").strip(), maxsplit=2)
@@ -125,9 +131,9 @@ async def cmd_bet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Сумма — целое число рублей.")
         return
 
-    bet = storage.create_bet(user_id, desc, rate, sum_rub)
+    bet = storage.create_bet(chat_id, user_id, desc, rate, sum_rub)
     if bet is None:
-        balance = storage.get_balance(user_id)
+        balance = storage.get_balance(chat_id, user_id)
         await update.message.reply_text(
             f"Недостаточно средств. Твой баланс: {balance:,} ₽"
         )
@@ -139,13 +145,13 @@ async def cmd_bet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"Коэффициент: {bet['rate']}\n"
         f"Сумма: {bet['sum']:,} ₽\n"
         f"Потенциальный выигрыш: {potential:,} ₽\n"
-        f"Баланс после ставки: {storage.get_balance(user_id):,} ₽"
+        f"Баланс после ставки: {storage.get_balance(chat_id, user_id):,} ₽"
     )
 
 
-def _format_bets_message(user_id: int) -> tuple[str, InlineKeyboardMarkup | None]:
+def _format_bets_message(chat_id: int, user_id: int) -> tuple[str, InlineKeyboardMarkup | None]:
     """Формирует текст списка ставок и клавиатуру для активных (до 15 шт.)."""
-    bets = storage.get_user_bets(user_id)[:20]
+    bets = storage.get_user_bets(chat_id, user_id)[:20]
     lines = []
     keyboard_rows = []
     for b in bets:
@@ -166,16 +172,37 @@ def _format_bets_message(user_id: int) -> tuple[str, InlineKeyboardMarkup | None
 
 async def cmd_bets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
-    bets = storage.get_user_bets(user_id)
+    chat_id = update.effective_chat.id
+    bets = storage.get_user_bets(chat_id, user_id)
     if not bets:
         await update.message.reply_text("У тебя пока нет ставок.")
         return
-    text, keyboard = _format_bets_message(user_id)
+    text, keyboard = _format_bets_message(chat_id, user_id)
     await update.message.reply_text(text, reply_markup=keyboard)
 
 
+async def cmd_active(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Показать все нерассчитанные (активные) ставки в чате."""
+    chat_id = update.effective_chat.id
+    active_bets = storage.get_all_active_bets(chat_id)
+    if not active_bets:
+        await update.message.reply_text("Нет нерассчитанных ставок. Все ставки закрыты.")
+        return
+    lines = ["⏳ Нерассчитанные ставки:\n"]
+    for b in active_bets[:30]:  # Ограничение до 30 ставок
+        author = f"@{b['username']}" if b.get("username") else f"ID{b['user_id']}"
+        potential = int(b["sum"] * b["rate"])
+        lines.append(
+            f"#{b['id']} | {author}\n"
+            f"   {b['description']}\n"
+            f"   Коэффициент: {b['rate']} | Сумма: {b['sum']:,} ₽ | Выигрыш: {potential:,} ₽\n"
+        )
+    await update.message.reply_text("\n".join(lines))
+
+
 async def cmd_top(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    users = storage.get_all_users_balances()
+    chat_id = update.effective_chat.id
+    users = storage.get_all_users_balances(chat_id)
     if not users:
         await update.message.reply_text("Пока никого нет.")
         return
@@ -189,7 +216,8 @@ async def cmd_top(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_results(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Подвести итоги и спросить подтверждение перед обнулением балансов."""
-    users = storage.get_all_users_balances()
+    chat_id = update.effective_chat.id
+    users = storage.get_all_users_balances(chat_id)
     if not users:
         await update.message.reply_text("Нет участников. Итоги подводить нечего.")
         return
@@ -201,8 +229,8 @@ async def cmd_results(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     lines.append("\nОбнулить балансы?")
     keyboard = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("Да", callback_data="results_yes"),
-            InlineKeyboardButton("Нет", callback_data="results_no"),
+            InlineKeyboardButton("Да", callback_data=f"results_yes_{chat_id}"),
+            InlineKeyboardButton("Нет", callback_data=f"results_no_{chat_id}"),
         ]
     ])
     await update.message.reply_text("\n".join(lines), reply_markup=keyboard)
@@ -212,13 +240,19 @@ async def results_confirm_callback(update: Update, context: ContextTypes.DEFAULT
     """Обработка нажатия кнопки подтверждения обнуления балансов."""
     query = update.callback_query
     await query.answer()
-    if query.data == "results_no":
+    # callback_data: results_yes_<chat_id> или results_no_<chat_id>
+    parts = query.data.split("_")
+    if len(parts) < 3:
+        await query.answer("Ошибка данных.", show_alert=True)
+        return
+    chat_id = int(parts[2])
+    if query.data.startswith("results_no"):
         await query.edit_message_text(
             query.message.text + "\n\n❌ Отменено."
         )
         return
-    if query.data == "results_yes":
-        count = storage.reset_all_balances_to_initial()
+    if query.data.startswith("results_yes"):
+        count = storage.reset_all_balances_to_initial(chat_id)
         await query.edit_message_text(
             query.message.text + f"\n\n✅ Балансы сброшены. У всех {count} участников снова по 10 000 ₽. Новый раунд!"
         )
@@ -228,6 +262,7 @@ async def settle_bet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     """Быстро закрыть ставку: Сыграло / Не сыграло из списка /bets."""
     query = update.callback_query
     user_id = query.from_user.id if query.from_user else 0
+    chat_id = query.message.chat.id if query.message else 0
     # callback_data: settle_<bet_id>_win или settle_<bet_id>_lost
     parts = query.data.split("_")
     if len(parts) != 3:
@@ -239,7 +274,7 @@ async def settle_bet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.answer("Неверный номер ставки.", show_alert=True)
         return
     won = parts[2] == "win"
-    bet = storage.get_bet(bet_id)
+    bet = storage.get_bet(chat_id, bet_id)
     if not bet:
         await query.answer("Ставка не найдена.", show_alert=True)
         return
@@ -250,14 +285,14 @@ async def settle_bet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.answer("Эта ставка уже закрыта.", show_alert=True)
         return
     username = (query.from_user.username or "") if query.from_user else ""
-    storage.settle_bet(bet_id, won, settled_by_user_id=user_id, settled_by_username=username)
+    storage.settle_bet(chat_id, bet_id, won, settled_by_user_id=user_id, settled_by_username=username)
     payout = int(bet["sum"] * bet["rate"]) if won else 0
-    new_balance = storage.get_balance(user_id)
+    new_balance = storage.get_balance(chat_id, user_id)
     if won:
         await query.answer(f"Ставка #{bet_id} сыграла! +{payout:,} ₽. Баланс: {new_balance:,} ₽")
     else:
         await query.answer(f"Ставка #{bet_id} не сыграла. Баланс: {new_balance:,} ₽")
-    text, keyboard = _format_bets_message(user_id)
+    text, keyboard = _format_bets_message(chat_id, user_id)
     await query.edit_message_text(text, reply_markup=keyboard)
 
 
@@ -269,9 +304,10 @@ def main() -> None:
     app.add_handler(CommandHandler("balance", cmd_balance))
     app.add_handler(CommandHandler("bet", cmd_bet))
     app.add_handler(CommandHandler("bets", cmd_bets))
+    app.add_handler(CommandHandler("active", cmd_active))
     app.add_handler(CommandHandler("top", cmd_top))
     app.add_handler(CommandHandler("results", cmd_results))
-    app.add_handler(CallbackQueryHandler(results_confirm_callback, pattern="^results_(yes|no)$"))
+    app.add_handler(CallbackQueryHandler(results_confirm_callback, pattern="^results_(yes|no)_-?\\d+$"))
     app.add_handler(CallbackQueryHandler(settle_bet_callback, pattern="^settle_\\d+_(win|lost)$"))
     print("Bot running. Press Ctrl+C to stop.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
